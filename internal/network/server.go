@@ -5,6 +5,7 @@ package network
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -294,12 +295,17 @@ func NewGameServer(config *ServerConfig) *GameServer {
 // Start запускает сервер
 func (gs *GameServer) Start() error {
 	mux := http.NewServeMux()
+	
+	// Раздаём статические файлы из папки public
+	fs := http.FileServer(http.Dir("public"))
+	mux.Handle("/", fs)
+	
 	mux.HandleFunc("/ws", gs.handleWebSocket)
 	mux.HandleFunc("/health", gs.handleHealth)
 	mux.HandleFunc("/stats", gs.handleStats)
 
 	gs.Server = &http.Server{
-		Addr:         ":" + string(rune(gs.Config.Port)),
+		Addr:         fmt.Sprintf(":%d", gs.Config.Port),
 		Handler:      mux,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,

@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Devast.io - Русская Альтернатива</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #fff;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        #gameCanvas {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        #ui {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        #loginScreen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            pointer-events: auto;
+            z-index: 100;
+        }
+
+        .login-box {
+            background: linear-gradient(145deg, #2d2d44, #1a1a2e);
+            padding: 40px;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+            text-align: center;
+            border: 2px solid #4a4a6a;
+        }
+
+        .login-box h1 {
+            margin-bottom: 10px;
+            font-size: 32px;
+            color: #ffd700;
+            text-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+        }
+
+        .login-box p {
+            margin-bottom: 30px;
+            color: #aaa;
+            font-size: 14px;
+        }
+
+        .login-box input {
+            width: 100%;
+            padding: 12px 20px;
+            margin-bottom: 20px;
+            border: 2px solid #4a4a6a;
+            border-radius: 8px;
+            background: #1a1a2e;
+            color: #fff;
+            font-size: 16px;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+
+        .login-box input:focus {
+            border-color: #ffd700;
+        }
+
+        .login-box button {
+            width: 100%;
+            padding: 12px 20px;
+            background: linear-gradient(145deg, #ffd700, #ff8c00);
+            border: none;
+            border-radius: 8px;
+            color: #1a1a2e;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .login-box button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(255, 215, 0, 0.4);
+        }
+
+        #hud {
+            display: none;
+            pointer-events: auto;
+        }
+
+        .hud-element {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 10px 15px;
+            border-radius: 8px;
+            border: 1px solid #4a4a6a;
+        }
+
+        #healthBar {
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 300px;
+        }
+
+        #healthFill {
+            height: 20px;
+            background: linear-gradient(90deg, #ff4444, #ff6666);
+            border-radius: 4px;
+            width: 100%;
+            transition: width 0.3s;
+        }
+
+        #healthText {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        #playerInfo {
+            top: 20px;
+            left: 20px;
+        }
+
+        #connectionStatus {
+            top: 20px;
+            right: 20px;
+        }
+
+        .status-connected {
+            color: #44ff44;
+        }
+
+        .status-disconnected {
+            color: #ff4444;
+        }
+
+        #minimap {
+            bottom: 20px;
+            right: 20px;
+            width: 150px;
+            height: 150px;
+            background: rgba(0, 0, 0, 0.8);
+            border: 2px solid #4a4a6a;
+            border-radius: 8px;
+        }
+
+        #inventory {
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+        }
+
+        .inventory-slot {
+            width: 50px;
+            height: 50px;
+            background: rgba(0, 0, 0, 0.6);
+            border: 2px solid #4a4a6a;
+            border-radius: 8px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 24px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="ui">
+        <!-- Экран входа -->
+        <div id="loginScreen">
+            <div class="login-box">
+                <h1>🎮 Devast.io</h1>
+                <p>Русская альтернатива - Выживай, Строй, Сражайся!</p>
+                <input type="text" id="nicknameInput" placeholder="Введите ваш никнейм" maxlength="20">
+                <button id="playButton">ИГРАТЬ</button>
+            </div>
+        </div>
+
+        <!-- HUD -->
+        <div id="hud">
+            <div id="playerInfo" class="hud-element">
+                <div>Игрок: <span id="playerName">-</span></div>
+                <div>ID: <span id="playerId">-</span></div>
+            </div>
+
+            <div id="connectionStatus" class="hud-element">
+                <span id="statusText" class="status-disconnected">● Отключено</span>
+            </div>
+
+            <div id="inventory" class="hud-element">
+                <div class="inventory-slot">👊</div>
+                <div class="inventory-slot"></div>
+                <div class="inventory-slot"></div>
+                <div class="inventory-slot"></div>
+                <div class="inventory-slot"></div>
+            </div>
+
+            <div id="healthBar" class="hud-element">
+                <div id="healthFill"></div>
+                <div id="healthText">100/100</div>
+            </div>
+
+            <canvas id="minimap" width="150" height="150"></canvas>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
