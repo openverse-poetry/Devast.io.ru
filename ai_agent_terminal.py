@@ -1,344 +1,229 @@
 #!/usr/bin/env python3
 """
-AI Agent для работы в терминале с автоматическим выполнением команд.
-Использует Ollama для подключения к локальной LLM модели.
-Реализует цикл: запрос → планирование → выполнение → результат → ответ
+AI Terminal Agent с использованием LangChain и Ollama.
+Агент может выполнять команды в терминале, читать/записывать файлы и исправлять ошибки в коде.
 """
 
 import os
 import subprocess
 import sys
-from typing import Type, List, Optional, Annotated
-from pathlib import Path
-
-from langchain_ollama import ChatOllama
-from langchain_core.tools import BaseTool, tool
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
-from langgraph.graph import StateGraph, START, END
-from typing_extensions import TypedDict
-from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
+from typing import Type
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_community.llms import Ollama
+from langchain_core.prompts import PromptTemplate
+from langchain_core.tools import BaseTool
+from pydantic import BaseModel, Field
 
 
-# Рабочая директория проекта
-WORK_DIR = "/workspace"
-DEVAST_DIR = os.path.join(WORK_DIR, "Devast.io.ru-main")
+# --- Инструменты (Tools) ---
+
+class ShellInput(BaseModel):
+    command: str = Field(description="Команда для выполнения в терминале")
 
 
-# ==================== ИНСТРУМЕНТЫ ====================
+class ShellTool(BaseTool):
+    name = "shell"
+    description = "Выполняет команду в системной оболочке (CMD/PowerShell/Bash) и возвращает вывод. Используйте для запуска скриптов, компиляции кода, навигации по файлам."
+    args_schema: Type[BaseModel] = ShellInput
 
-def shell_tool(command: str) -> str:
-    """Выполняет команду в оболочке (bash) и возвращает результат.
-    Используйте для запуска команд, компиляции кода, проверки файлов.
-    
-    Args:
-        command: Команда для выполнения в bash
-    """
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            cwd=WORK_DIR
-        )
-        output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\nRETURN CODE: {result.returncode}"
-        return output
-    except subprocess.TimeoutExpired:
-        return "Ошибка: команда выполнялась слишком долго (>60 сек)"
-    except Exception as e:
-        return f"Ошибка при выполнении команды: {str(e)}"
+    def _run(self, command: str) -> str:
+        try:
+            # Определяем оболочку в зависимости от ОС
+            if sys.platform == "win32":
+                shell_cmd = ["powershell", "-Command", command]
+            else:
+                shell_cmd = ["/bin/bash", "-c", command]
+            
+            result = subprocess.run(
+                shell_cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,  # Таймаут 60 секунд
+                cwd="/workspace"  # Рабочая директория
+            )
+            
+            output = ""
+            if result.stdout:
+                output += f"STDOUT:\n{result.stdout}\n"
+            if result.stderr:
+                output += f"STDERR:\n{result.stderr}\n"
+            if not output:
+                output = "Команда выполнена успешно (нет вывода)."
+            
+            output += f"\nКод возврата: {result.returncode}"
+            return output
+        except subprocess.TimeoutExpired:
+            return "Ошибка: Время выполнения команды истекло (лимит 60 сек)."
+        except Exception as e:
+            return f"Ошибка выполнения команды: {str(e)}"
 
 
-def read_file_tool(file_path: str) -> str:
-    """Читает содержимое файла.
-    
-    Args:
-        file_path: Путь к файлу (относительный или абсолютный)
-    """
-    try:
-        abs_path = os.path.abspath(os.path.join(WORK_DIR, file_path))
-        if not abs_path.startswith(WORK_DIR):
-            return f"Ошибка: доступ только к файлам в {WORK_DIR}"
+class ReadFileInput(BaseModel):
+    filepath: str = Field(description="Путь к файлу относительно /workspace")
+
+
+class ReadFileTool(BaseTool):
+    name = "read_file"
+    description = "Читает содержимое файла. Используйте для анализа кода, логов или конфигураций."
+    args_schema: Type[BaseModel] = ReadFileInput
+
+    def _run(self, filepath: str) -> str:
+        full_path = os.path.join("/workspace", filepath)
+        if not os.path.exists(full_path):
+            return f"Ошибка: Файл не найден: {full_path}"
+        if not os.path.isfile(full_path):
+            return f"Ошибка: Путь не является файлом: {full_path}"
         
-        if not os.path.exists(abs_path):
-            return f"Ошибка: файл не найден: {abs_path}"
+        try:
+            with open(full_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return f"Содержимое файла {filepath}:\n{content}"
+        except Exception as e:
+            return f"Ошибка чтения файла: {str(e)}"
+
+
+class WriteFileInput(BaseModel):
+    filepath: str = Field(description="Путь к файлу относительно /workspace")
+    content: str = Field(description="Содержимое для записи в файл")
+
+
+class WriteFileTool(BaseTool):
+    name = "write_file"
+    description = "Записывает содержимое в файл (перезаписывает существующий или создает новый). Используйте для исправления кода или создания скриптов."
+    args_schema: Type[BaseModel] = WriteFileInput
+
+    def _run(self, filepath: str, content: str) -> str:
+        full_path = os.path.join("/workspace", filepath)
+        try:
+            # Создаем директорию, если она не существует
+            dir_name = os.path.dirname(full_path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+            
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            return f"Файл успешно записан: {filepath}"
+        except Exception as e:
+            return f"Ошибка записи файла: {str(e)}"
+
+
+class ListDirInput(BaseModel):
+    path: str = Field(default=".", description="Путь к директории относительно /workspace")
+
+
+class ListDirTool(BaseTool):
+    name = "list_dir"
+    description = "Выводит список файлов и папок в указанной директории."
+    args_schema: Type[BaseModel] = ListDirInput
+
+    def _run(self, path: str = ".") -> str:
+        full_path = os.path.join("/workspace", path)
+        if not os.path.exists(full_path):
+            return f"Ошибка: Директория не найдена: {full_path}"
         
-        with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-        return f"Содержимое файла {file_path}:\n{content}"
-    except Exception as e:
-        return f"Ошибка при чтении файла: {str(e)}"
+        try:
+            items = os.listdir(full_path)
+            formatted_list = "\n".join(items)
+            return f"Содержимое директории {path}:\n{formatted_list}"
+        except Exception as e:
+            return f"Ошибка чтения директории: {str(e)}"
 
 
-def write_file_tool(file_path: str, content: str) -> str:
-    """Записывает содержимое в файл (создает новый или перезаписывает).
-    
-    Args:
-        file_path: Путь к файлу
-        content: Содержимое для записи
-    """
-    try:
-        abs_path = os.path.abspath(os.path.join(WORK_DIR, file_path))
-        if not abs_path.startswith(WORK_DIR):
-            return f"Ошибка: запись только в файлы внутри {WORK_DIR}"
-        
-        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-        
-        with open(abs_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        
-        return f"✓ Файл успешно записан: {file_path}"
-    except Exception as e:
-        return f"Ошибка при записи файла: {str(e)}"
-
-
-def list_directory_tool(dir_path: str = ".") -> str:
-    """Показывает список файлов и папок в директории.
-    
-    Args:
-        dir_path: Путь к директории (по умолчанию рабочая директория)
-    """
-    try:
-        abs_path = os.path.abspath(os.path.join(WORK_DIR, dir_path))
-        if not abs_path.startswith(WORK_DIR):
-            return f"Ошибка: доступ только к директориям в {WORK_DIR}"
-        
-        if not os.path.isdir(abs_path):
-            return f"Ошибка: не является директорией: {abs_path}"
-        
-        items = []
-        for item in sorted(os.listdir(abs_path)):
-            full_path = os.path.join(abs_path, item)
-            prefix = "[DIR]  " if os.path.isdir(full_path) else "[FILE] "
-            items.append(f"{prefix}{item}")
-        
-        return f"Содержимое {dir_path}:\n" + "\n".join(items)
-    except Exception as e:
-        return f"Ошибка: {str(e)}"
-
-
-# Создаем объекты инструментов
-tools = [
-    tool(shell_tool),
-    tool(read_file_tool),
-    tool(write_file_tool),
-    tool(list_directory_tool),
-]
-
-
-# ==================== АГЕНТ ====================
+# --- Настройка агента ---
 
 def create_agent():
-    """Создает AI агента с инструментами"""
-    
-    llm = ChatOllama(
-        model="llama3.2",
-        temperature=0,
-        base_url="http://localhost:11434"
+    # Инициализация LLM через Ollama
+    llm = Ollama(
+        model="llama3.2",  # Убедитесь, что модель скачана: ollama pull llama3.2
+        base_url="http://localhost:11434",
+        temperature=0.1  # Низкая температура для более точного выполнения команд
     )
-    
-    llm_with_tools = llm.bind_tools(tools)
-    
-    system_message = f"""Ты - автономный AI агент для работы в терминале Linux. 
-Твоя задача - выполнять задачи пользователя, самостоятельно используя инструменты.
 
+    # Набор инструментов
+    tools = [
+        ShellTool(),
+        ReadFileTool(),
+        WriteFileTool(),
+        ListDirTool()
+    ]
+
+    # Промпт для агента
+    prompt_template = """Ты — автономный AI-агент для работы в терминале. Твоя задача — выполнять приказы пользователя, используя доступные инструменты.
+    
 Доступные инструменты:
-1. shell_tool - выполнение bash команд (запуск программ, компиляция, git и т.д.)
-2. read_file - чтение файлов (код, конфиги, логи)
-3. write_file - запись/изменение файлов (исправление ошибок, создание кода)
-4. list_directory - просмотр содержимого директорий
+1. `shell` - выполнение команд в терминале (компиляция, запуск скриптов, навигация).
+2. `read_file` - чтение файлов (анализ кода, логов).
+3. `write_file` - запись файлов (исправление ошибок, создание скриптов).
+4. `list_dir` - просмотр содержимого директорий.
 
-Рабочая директория: {WORK_DIR}
-Проект Devast.io.ru-main находится в: {DEVAST_DIR}
+Правила:
+- Всегда работай в директории `/workspace`.
+- Если пользователь просит исправить ошибку в `main.go`, сначала прочитай файл, найди ошибку, затем запиши исправленную версию.
+- После выполнения команды через `shell` докладывай о результате (успех/ошибка, вывод команды).
+- Действуй пошагово: план → выполнение → проверка результата.
+- Если команда завершается ошибкой, проанализируй STDERR и предложи решение.
 
-ПРАВИЛА РАБОТЫ:
-- Всегда сначала анализируй задачу, затем планируй действия
-- Используй инструменты последовательно для решения задачи
-- После каждого вызова инструмента анализируй результат
-- Если команда вернула ошибку - проанализируй и предложи решение
-- Для исправления ошибок в main.go: прочитай файл → найди проблему → запиши исправление
-- Докладывай пользователю о каждом шаге и конечном результате
-- Отвечай на русском языке четко и по делу
+Начинай работу сразу после получения приказа. Не задавай лишних вопросов, действуй самостоятельно.
 
-Если задача выполнена - сообщи об этом пользователю."""
+Приказ пользователя: {input}
+{agent_scratchpad}
+"""
 
-    return llm_with_tools, system_message
+    prompt = PromptTemplate.from_template(prompt_template)
 
-
-class AgentState(TypedDict):
-    messages: Annotated[List, add_messages]
-
-
-def agent_node(state: AgentState, llm, system_message: str):
-    """Узел агента - принимает решение о следующем действии"""
-    messages = state["messages"]
-    
-    # Добавляем системное сообщение в начало если это первый ход
-    if len(messages) == 1 or not isinstance(messages[0], SystemMessage):
-        messages = [SystemMessage(content=system_message)] + messages
-    
-    response = llm.invoke(messages)
-    return {"messages": [response]}
-
-
-def should_continue(state: AgentState) -> str:
-    """Определяет, продолжать ли выполнение или завершить"""
-    messages = state["messages"]
-    last_message = messages[-1]
-    
-    # Если есть вызовы инструментов - продолжаем к их выполнению
-    if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
-        return "tools"
-    
-    # Иначе завершаем
-    return "end"
-
-
-def run_agent():
-    """Запускает интерактивный цикл агента с автоматическим выполнением"""
-    
-    print("\n" + "=" * 70)
-    print("🤖 AI TERMINAL AGENT - Автономный агент для работы в терминале")
-    print("=" * 70)
-    print(f"📁 Рабочая директория: {WORK_DIR}")
-    print(f"🛠️  Доступные инструменты:")
-    print("   • shell_tool     - выполнение bash команд")
-    print("   • read_file      - чтение файлов")
-    print("   • write_file     - запись/изменение файлов")
-    print("   • list_directory - просмотр директорий")
-    print("=" * 70)
-    print("💡 Примеры запросов:")
-    print("   • 'Покажи структуру проекта'")
-    print("   • 'Найди ошибки в main.go и исправь их'")
-    print("   • 'Скомпилируй проект и запусти тесты'")
-    print("   • 'Создай файл test.py с функцией hello world'")
-    print("=" * 70)
-    print("Команды управления:")
-    print("   exit/quit - выход | clear - очистить историю | help - помощь")
-    print("=" * 70)
-    
-    try:
-        llm, system_message = create_agent()
-    except Exception as e:
-        print(f"\n❌ Ошибка инициализации модели: {e}")
-        print("\nДля работы агента необходимо:")
-        print("1. Установить Ollama: https://ollama.ai")
-        print("2. Запустить: ollama serve")
-        print("3. Скачать модель: ollama pull llama3.2")
-        return
-    
-    # Создаем граф с циклом выполнения
-    workflow = StateGraph(AgentState)
-    
-    # Добавляем узлы
-    workflow.add_node("agent", lambda state: agent_node(state, llm, system_message))
-    workflow.add_node("tools", ToolNode(tools))
-    
-    # Добавляем ребра
-    workflow.add_edge(START, "agent")
-    workflow.add_conditional_edges(
-        "agent",
-        should_continue,
-        {
-            "tools": "tools",
-            "end": END
-        }
+    # Создание агента
+    agent = create_react_agent(llm, tools, prompt)
+    agent_executor = AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=True,
+        handle_parsing_errors=True,
+        max_iterations=10  # Максимум шагов для выполнения задачи
     )
-    workflow.add_edge("tools", "agent")
-    
-    app = workflow.compile()
-    
-    history = []
-    
+
+    return agent_executor
+
+
+# --- Основной цикл ---
+
+def main():
+    print("🤖 AI Terminal Agent запущен!")
+    print("Рабочая директория: /workspace")
+    print("Доступные команды: вводите приказы на естественном языке.")
+    print("Для выхода введите 'exit' или 'quit'.\n")
+
+    try:
+        agent = create_agent()
+    except Exception as e:
+        print(f"❌ Ошибка инициализации агента: {e}")
+        print("Убедитесь, что Ollama запущен (`ollama serve`) и модель `llama3.2` установлена (`ollama pull llama3.2`).")
+        sys.exit(1)
+
     while True:
         try:
             user_input = input("\n👤 Вы: ").strip()
+            if user_input.lower() in ["exit", "quit", "выход"]:
+                print("👋 Агент завершает работу.")
+                break
             
             if not user_input:
                 continue
+
+            print("\n🤖 Агент думает...")
+            response = agent.invoke({"input": user_input})
             
-            if user_input.lower() in ['exit', 'quit', 'выход']:
-                print("\n👋 До свидания!")
-                break
-            
-            if user_input.lower() == 'clear':
-                history = []
-                print("🧹 История очищена.")
-                continue
-            
-            if user_input.lower() == 'help':
-                print("\n📖 СПРАВКА:")
-                print("   Вводите задачи на естественном языке.")
-                print("   Агент сам выберет нужные инструменты и выполнит их.")
-                print("   Пример: 'Проверь main.go на ошибки и исправь их'")
-                continue
-            
-            # Добавляем сообщение пользователя
-            history.append(HumanMessage(content=user_input))
-            
-            # Запускаем агента
-            print("\n🤖 🔄 Агент обрабатывает запрос...")
-            print("-" * 70)
-            
-            step_count = 0
-            max_steps = 10  # Ограничение на количество шагов
-            
-            try:
-                config = {"recursion_limit": max_steps * 2}
-                result = app.invoke({"messages": history}, config=config)
-                
-                # Получаем все сообщения
-                messages = result["messages"]
-                
-                # Показываем ход выполнения
-                for msg in messages:
-                    if isinstance(msg, SystemMessage):
-                        continue
-                    
-                    if isinstance(msg, HumanMessage):
-                        # Пропускаем вывод сообщения пользователя (оно уже было введено)
-                        continue
-                    
-                    if isinstance(msg, AIMessage):
-                        if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                            for tc in msg.tool_calls:
-                                print(f"\n🔧 Вызов инструмента: {tc['name']}")
-                                args_str = str(tc.get('args', {}))
-                                if len(args_str) > 100:
-                                    args_str = args_str[:100] + "..."
-                                print(f"   Параметры: {args_str}")
-                        elif msg.content:
-                            print(f"\n💬 Ответ агента:\n{msg.content}")
-                    
-                    if isinstance(msg, ToolMessage):
-                        result_preview = msg.content[:500] if len(msg.content) > 500 else msg.content
-                        print(f"\n📊 Результат инструмента:\n{result_preview}")
-                        if len(msg.content) > 500:
-                            print("... (обрезано)")
-                
-                # Обновляем историю (добавляем все новые сообщения)
-                new_messages = messages[len(history):]
-                history.extend(new_messages)
-                
-            except Exception as e:
-                print(f"\n❌ Ошибка при выполнении: {e}")
-                # Удаляем последнее сообщение пользователя при ошибке
-                if history and isinstance(history[-1], HumanMessage):
-                    history.pop()
-                
+            print("\n🤖 Агент:")
+            if "output" in response:
+                print(response["output"])
+            else:
+                print("Задача выполнена.")
+
         except KeyboardInterrupt:
-            print("\n\n⚠️  Прервано пользователем (Ctrl+C)")
-            choice = input("Продолжить работу? (y/n): ").strip().lower()
-            if choice != 'y':
-                break
-        except EOFError:
-            print("\n🔚 Конец ввода.")
+            print("\n⚠️ Прервано пользователем.")
             break
-    
-    print("\n✅ Работа агента завершена.\n")
+        except Exception as e:
+            print(f"\n❌ Ошибка: {e}")
 
 
 if __name__ == "__main__":
-    run_agent()
+    main()
